@@ -1226,6 +1226,8 @@ pcm.quad2 {
 
 */
 
+int snd_pcm_null_open(snd_pcm_t **pcmp, const char *name, snd_pcm_stream_t stream, int mode);
+
 /**
  * \brief Creates a new Multi PCM
  * \param pcmp Returns created PCM handle
@@ -1421,14 +1423,71 @@ int _snd_pcm_multi_open(snd_pcm_t **pcmp, const char *name,
 		channels_schannel[cchannel] = schannel;
 	}
 	
-	for (idx = 0; idx < slaves_count; ++idx) {
+	idx = 0;
+	snd_config_for_each(i, inext, slaves) {
+		snd_config_t *n = snd_config_iterator_entry(i);
+		const char *id;
+		const char *str;
+		int optional = 0;
+
+		if (snd_config_get_id(n, &id) < 0)
+			continue;
+
+		if (snd_config_get_string(n, &str) >= 0) {
+			err = snd_config_search_definition(root, "pcm_slave", str, &n);
+			if (err < 0) {
+				SNDERR("Invalid slave definition");
+				err = -EINVAL;
+				goto _free;
+			}
+		}
+
+		if (snd_config_get_type(n) != SND_CONFIG_TYPE_COMPOUND) {
+			SNDERR("Invalid slave definition");
+			err = -EINVAL;
+			goto _free;
+		}
+
+		snd_config_for_each(j, jnext, n) {
+			snd_config_t *m = snd_config_iterator_entry(j);
+			const char *idm;
+			const char *str;
+
+			if (snd_config_get_id(m, &idm) < 0)
+				continue;
+
+			if (strcmp(idm, "comment") == 0) {
+				err = snd_config_get_string(m, &str);
+				if (err < 0) {
+					SNDERR("Comment field is not a string");
+					goto _free;
+				}
+				if (strcmp(str, "optional") != 0) {
+					SNDERR("Comment field has unrecognized value: %s", str);
+					goto _free;
+				}
+
+				optional = 1;
+			}
+		}
+
 		err = snd_pcm_open_slave(&slaves_pcm[idx], root,
 					 slaves_conf[idx], stream, mode,
 					 conf);
-		if (err < 0)
+		if (err == -ENODEV && optional != 0) {
+			err = snd_pcm_null_open(&slaves_pcm[idx], NULL, stream, mode);
+			if (err < 0) {
+				SNDERR("Failed to open null PCM for non-present optional slave");
+				goto _free;
+			}
+			SNDERR("Optional slave '%s' not found; continuing...", id);
+			idx += 1;
+			continue;
+		} else if (err < 0)
 			goto _free;
 		snd_config_delete(slaves_conf[idx]);
 		slaves_conf[idx] = NULL;
+		idx += 1;
 	}
 	err = snd_pcm_multi_open(pcmp, name, slaves_count, master_slave,
 				 slaves_pcm, slaves_channels,
